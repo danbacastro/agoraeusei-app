@@ -1,0 +1,468 @@
+# streamlit_quiz_app.py
+# -------------------------------------------------------------
+# App de questões para estudo (GO - Obstetrícia)
+# - Carrega CSV: id, tema, enunciado, alternativa_a, ..., alternativa_e, correta, explicacao, dificuldade, tags
+# - Perguntas aleatórias sem repetição até esgotar (com filtro por tema)
+# - Feedback Correto/Errado + justificativa
+# - Estatísticas e gráfico de erros por tema
+# - Timer por questão (opcional) com penalização automática ao expirar
+# - Randomização da ordem das alternativas (gabarito consistente)
+# Correções:
+# - "Próxima pergunta" libera com um clique (sem dupla contagem)
+# - Progresso e posição da questão atual exibidos corretamente
+# -------------------------------------------------------------
+
+import time
+import random
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+
+st.set_page_config(
+    page_title="Banco de Questões GO - Obstetrícia",
+    page_icon="🩺",
+    layout="wide"
+)
+
+# =========================
+# Helpers de estado
+# =========================
+
+def init_state():
+    defaults = {
+        "df": None,
+        "filtered_df": None,
+        "order": [],                 # índices (linhas) do filtered_df em ordem aleatória
+        "pos": 0,                    # posição atual no vetor order
+        "feedback_shown": False,     # True após confirmar a resposta
+        "history": [],               # respostas do usuário
+        "stats": {"answered": 0, "correct": 0, "wrong": 0},
+        "tema_filtro": [],           # filtros de tema
+        "ready": False,              # rodada inicializada
+        "answered_ids": set(),       # evita dupla contagem por questão
+        "shuffle_map": {},           # id_da_questao -> lista com ordem das letras originais exibidas em A..E (ex.: ['C','A','E','B','D'])
+        "timer_enabled": False,
+        "timer_duration": 60,        # segundos por questão
+        "question_start_ts": None,   # time.time() ao exibir nova questão
+        "timeout_recorded_ids": set()# evita duplo registro por timeout
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+def load_csv(file) -> pd.DataFrame:
+    df = pd.read_csv(file)
+    expected_cols = [
+        "id","tema","enunciado",
+        "alternativa_a","alternativa_b","alternativa_c","alternativa_d","alternativa_e",
+        "correta","explicacao","dificuldade","tags"
+    ]
+    missing = [c for c in expected_cols if c not in df.columns]
+    if missing:
+        st.error(f"CSV faltando colunas: {missing}")
+        st.stop()
+    return df
+
+def reset_round():
+    """Reinicia a rodada mantendo o DataFrame atual e o filtro de temas."""
+    df = st.session_state.df.copy()
+    temas = st.session_state.tema_filtro or sorted(df["tema"].dropna().unique().tolist())
+    filtered = df[df["tema"].isin(temas)].reset_index(drop=True)
+
+    if filtered.empty:
+        st.warning("Nenhuma questão encontrada para os temas selecionados.")
+        st.session_state.ready = False
+        return
+
+    order = list(range(len(filtered)))
+    random.shuffle(order)
+
+    st.session_state.filtered_df = filtered
+    st.session_state.order = order
+    st.session_state.pos = 0
+    st.session_state.feedback_shown = False
+    st.session_state.history = []
+    st.session_state.stats = {"answered": 0, "correct": 0, "wrong": 0}
+    st.session_state.answered_ids = set()
+    st.session_state.shuffle_map = {}
+    st.session_state.timeout_recorded_ids = set()
+    st.session_state.ready = True
+    st.session_state.question_start_ts = time.time()
+
+def start_new_round_from_theme_change():
+    """Quando usuário altera filtros de tema; recomeça a rodada."""
+    if st.session_state.df is not None:
+        reset_round()
+
+def get_current_row():
+    if not st.session_state.ready:
+        return None
+    if st.session_state.pos >= len(st.session_state.order):
+        return None
+    idx = st.session_state.order[st.session_state.pos]
+    return st.session_state.filtered_df.iloc[idx]
+
+def ensure_shuffle_for_question(qid: str):
+    """Gera e fixa uma ordem de alternativas por questão para estabilidade entre reruns."""
+    if qid not in st.session_state.shuffle_map:
+        original_letters = ["A","B","C","D","E"]
+        random.shuffle(original_letters)
+        st.session_state.shuffle_map[qid] = original_letters
+
+def build_display_options(row):
+    """Retorna:
+       - displayed_options: dict {'A': 'texto', 'B': 'texto', ...} com ordem aleatória por questão
+       - displayed_correct_letter: letra A..E correta NA EXIBIÇÃO atual
+       - original_map: dict displayed_letter -> original_letter (para histórico)"""
+    qid = str(row["id"])
+    ensure_shuffle_for_question(qid)
+    order = st.session_state.shuffle_map[qid]  # lista de letras originais na ordem exibida
+
+    original_texts = {
+        "A": row["alternativa_a"],
+        "B": row["alternativa_b"],
+        "C": row["alternativa_c"],
+        "D": row["alternativa_d"],
+        "E": row["alternativa_e"],
+    }
+
+    displayed_letters = ["A","B","C","D","E"]
+    displayed_options = {}
+    original_map = {}
+
+    for i, disp_letter in enumerate(displayed_letters):
+        orig_letter = order[i]
+        displayed_options[disp_letter] = original_texts[orig_letter]
+        original_map[disp_letter] = orig_letter
+
+    original_correct = str(row["correta"]).strip().upper()
+    # encontra qual displayed_letter aponta para a original correta
+    inv_map = {v: k for k, v in original_map.items()}
+    displayed_correct_letter = inv_map[original_correct]
+
+    return displayed_options, displayed_correct_letter, original_map
+
+def record_answer(row, selected_displayed_letter: str, displayed_correct_letter: str, timeout=False):
+    """Registra resposta do usuário com proteção anti-dupla contagem."""
+    qid = str(row["id"])
+    if qid in st.session_state.answered_ids:
+        return  # já contabilizada
+
+    is_correct = (selected_displayed_letter == displayed_correct_letter) and (not timeout)
+
+    st.session_state.stats["answered"] += 1
+    if is_correct:
+        st.session_state.stats["correct"] += 1
+    else:
+        st.session_state.stats["wrong"] += 1
+
+    st.session_state.history.append({
+        "id": qid,
+        "tema": row["tema"],
+        "dificuldade": row["dificuldade"],
+        "selected": selected_displayed_letter if not timeout else "— (tempo)",
+        "correct": displayed_correct_letter,
+        "acertou": is_correct,
+        "timeout": timeout
+    })
+
+    st.session_state.answered_ids.add(qid)
+
+def next_question():
+    st.session_state.pos += 1
+    st.session_state.feedback_shown = False
+    st.session_state.question_start_ts = time.time()
+
+# =========================
+# UI - Header
+# =========================
+
+init_state()
+
+st.markdown("""
+<style>
+.badge {display:inline-block; padding:0.25rem 0.5rem; border-radius:999px; font-size:0.75rem; font-weight:600; background:#f1f5f9;}
+.badge-blue {background:#e0f2fe;}
+.badge-amber {background:#fef3c7;}
+.card {padding:1rem 1.25rem; border:1px solid #e5e7eb; border-radius:0.75rem; background:#ffffff;}
+.prompt {font-size:1.1rem; line-height:1.6;}
+.option {padding:0.5rem 0.75rem; border-radius:0.5rem; background:#f8fafc; margin-bottom:0.25rem;}
+.correct {border-left:6px solid #16a34a; background:#ecfdf5;}
+.wrong {border-left:6px solid #dc2626; background:#fef2f2;}
+.small {font-size:0.875rem; color:#475569;}
+.timer {font-weight:600;}
+</style>
+""", unsafe_allow_html=True)
+
+left, right = st.columns([0.7, 0.3], gap="large")
+with left:
+    st.title("🩺 Banco de Questões – Obstetrícia (GO)")
+    st.caption("Estudo ativo com questões aleatórias, feedback imediato, timer e estatísticas por tema.")
+with right:
+    st.metric("Questões no banco", value="—")
+
+# =========================
+# Sidebar - Configurações
+# =========================
+
+with st.sidebar:
+    st.header("Configurações")
+    st.write("Carregue o **CSV** ou use `questoes_obstetricia_completo.csv` no diretório do app.")
+
+    uploaded = st.file_uploader("CSV de questões", type=["csv"])
+
+    if uploaded is not None:
+        try:
+            st.session_state.df = load_csv(uploaded)
+        except Exception as e:
+            st.error(f"Erro ao ler o CSV enviado: {e}")
+    else:
+        # tenta carregar padrão
+        try:
+            st.session_state.df = load_csv("questoes_obstetricia_completo.csv")
+        except Exception:
+            st.info("Nenhum arquivo padrão encontrado. Faça o upload do CSV para começar.")
+
+    if st.session_state.df is not None:
+        st.success("Banco carregado com sucesso.")
+        st.metric("Total de questões", len(st.session_state.df))
+
+        temas = sorted(st.session_state.df["tema"].dropna().unique().tolist())
+        st.session_state.tema_filtro = st.multiselect(
+            "Filtrar por tema (opcional):",
+            temas,
+            default=temas,
+            on_change=start_new_round_from_theme_change
+        )
+
+        # Timer
+        st.session_state.timer_enabled = st.checkbox("⏱️ Ativar timer por questão", value=st.session_state.timer_enabled)
+        st.session_state.timer_duration = st.number_input(
+            "Duração do timer (segundos)", min_value=10, max_value=600, step=10,
+            value=int(st.session_state.timer_duration)
+        )
+
+        col_sb1, col_sb2 = st.columns(2)
+        with col_sb1:
+            if st.button("🔀 Iniciar / Reiniciar rodada", use_container_width=True):
+                reset_round()
+        with col_sb2:
+            if st.button("🧹 Limpar estatísticas", use_container_width=True):
+                st.session_state.history = []
+                st.session_state.stats = {"answered": 0, "correct": 0, "wrong": 0}
+                st.session_state.answered_ids = set()
+                st.session_state.timeout_recorded_ids = set()
+                try:
+                    st.toast("Estatísticas zeradas.")
+                except Exception:
+                    st.success("Estatísticas zeradas.")
+
+# =========================
+# Corpo principal
+# =========================
+
+if st.session_state.df is None:
+    st.stop()
+
+# Atualiza métrica do header com total de questões
+with right:
+    if st.session_state.ready and st.session_state.filtered_df is not None:
+        st.metric("Questões no banco", value=len(st.session_state.filtered_df))
+    else:
+        st.metric("Questões no banco", value=len(st.session_state.df))
+
+if not st.session_state.ready:
+    st.info("Selecione os temas (opcional), ajuste o timer e clique em **Iniciar / Reiniciar rodada** na barra lateral para começar.")
+    st.stop()
+
+total = len(st.session_state.order)
+pos = st.session_state.pos
+answered = st.session_state.stats["answered"]
+correct = st.session_state.stats["correct"]
+wrong = st.session_state.stats["wrong"]
+
+# Cabeçalho de progresso (agora mostra questão atual 1-based)
+st.markdown(f"**Questão {min(pos+1, total)} de {total}**  •  Respondidas: **{answered}/{total}**")
+st.progress((pos) / total if total else 0, text=f"Concluídas: {pos}/{total}")
+
+row = get_current_row()
+
+if row is None:
+    st.success("🎉 Você respondeu todas as perguntas desta rodada!")
+    acc = (correct / answered * 100) if answered else 0.0
+    st.metric("Aproveitamento", f"{acc:.1f}%")
+    col_end1, col_end2 = st.columns([0.4,0.6])
+    with col_end1:
+        if st.button("🔁 Reiniciar com os mesmos filtros"):
+            reset_round()
+    with col_end2:
+        st.write("Dica: ajuste os filtros de tema na barra lateral para focar onde houve mais erro.")
+    st.balloons()
+    st.stop()
+
+# ---------------------------
+# Cartão da questão
+# ---------------------------
+qid = str(row["id"])
+displayed_options, displayed_correct_letter, original_map = build_display_options(row)
+
+st.markdown('<div class="card">', unsafe_allow_html=True)
+top_cols = st.columns([0.5,0.2,0.3])
+with top_cols[0]:
+    st.markdown(f"**{row['id']}**")
+    st.markdown(f'<span class="badge badge-blue">{row["tema"]}</span> &nbsp; '
+                f'<span class="badge badge-amber">Dificuldade: {row["dificuldade"]}</span>', unsafe_allow_html=True)
+with top_cols[1]:
+    st.metric("Respondidas", answered)
+with top_cols[2]:
+    acc = (correct / answered * 100) if answered else 0.0
+    st.metric("Aproveitamento", f"{acc:.1f}%")
+
+# Timer (visual + penalização ao expirar)
+if st.session_state.timer_enabled:
+    if st.session_state.question_start_ts is None:
+        st.session_state.question_start_ts = time.time()
+    elapsed = time.time() - st.session_state.question_start_ts
+    remaining = int(st.session_state.timer_duration - elapsed)
+    if remaining < 0:
+        remaining = 0
+    st.markdown(f'⏱️ <span class="timer">Tempo restante:</span> **{remaining}s**', unsafe_allow_html=True)
+
+    # Se tempo acabou e ainda não mostramos feedback, registrar automático (errado por tempo)
+    if remaining == 0 and (not st.session_state.feedback_shown) and (qid not in st.session_state.timeout_recorded_ids):
+        record_answer(row, selected_displayed_letter="—", displayed_correct_letter=displayed_correct_letter, timeout=True)
+        st.session_state.feedback_shown = True
+        st.session_state.timeout_recorded_ids.add(qid)
+
+st.markdown(f'<div class="prompt">{row["enunciado"]}</div>', unsafe_allow_html=True)
+st.divider()
+
+# Opções A-E (randomizadas mas estáveis por questão)
+options = displayed_options  # dict displayed_letter -> text
+
+# Radio com chave estável por pergunta
+radio_key = f"radio_{qid}"
+labels = [f"{k}) {v}" for k, v in options.items()]
+disabled = st.session_state.feedback_shown  # desativa após confirmar
+
+choice_label = st.radio(
+    "Escolha uma alternativa:",
+    options=labels,
+    index=None,
+    key=radio_key,
+    disabled=disabled,
+    label_visibility="collapsed"
+)
+
+# Mapeia label escolhido para letra exibida A-E
+selected_displayed_letter = None
+if choice_label:
+    selected_displayed_letter = choice_label.split(")")[0]
+
+cols_btn = st.columns([0.5, 0.5])
+with cols_btn[0]:
+    confirm = st.button("✅ Confirmar resposta", use_container_width=True, disabled=st.session_state.feedback_shown)
+with cols_btn[1]:
+    prox = st.button("➡️ Próxima pergunta", use_container_width=True, disabled=not st.session_state.feedback_shown)
+
+feedback_placeholder = st.container()
+
+# Confirmação: registra uma única vez e revela feedback
+if confirm and not st.session_state.feedback_shown:
+    if not selected_displayed_letter:
+        st.warning("Por favor, selecione uma alternativa antes de confirmar.")
+    else:
+        record_answer(row, selected_displayed_letter, displayed_correct_letter, timeout=False)
+        st.session_state.feedback_shown = True
+
+# Feedback (após confirmar ou timeout)
+if st.session_state.feedback_shown:
+    with feedback_placeholder:
+        is_correct = False
+        # Busca o último registro desta questão no histórico para firmar o status
+        for item in reversed(st.session_state.history):
+            if item["id"] == qid:
+                is_correct = item["acertou"]
+                break
+
+        if is_correct:
+            st.success(f"✅ **Correta!**")
+        else:
+            # se houve seleção, mostrar qual foi; se timeout, mensagem apropriada
+            last = next((h for h in reversed(st.session_state.history) if h["id"] == qid), None)
+            if last and last.get("timeout"):
+                st.error(f"⌛ **Tempo esgotado.** A alternativa correta é **{displayed_correct_letter}**.")
+            else:
+                st.error(f"❌ **Errada.** A correta é **{displayed_correct_letter}**.")
+
+        # Mostra alternativas com destaque
+        st.markdown("**Alternativas:**")
+        for k, v in options.items():
+            klass = "option"
+            # Descobre qual foi a marcada (se houve)
+            marked = None
+            last = next((h for h in reversed(st.session_state.history) if h["id"] == qid), None)
+            if last and not last.get("timeout"):
+                marked = last["selected"]
+
+            if k == displayed_correct_letter:
+                klass += " correct"
+            elif marked and k == marked and k != displayed_correct_letter:
+                klass += " wrong"
+            st.markdown(f'<div class="{klass}"><strong>{k})</strong> {v}</div>', unsafe_allow_html=True)
+
+        st.markdown("**Justificativa:**")
+        st.info(row["explicacao"])
+
+# Próxima questão
+if prox and st.session_state.feedback_shown:
+    next_question()
+
+st.markdown('</div>', unsafe_allow_html=True)  # fecha card
+
+# =========================
+# Estatísticas
+# =========================
+st.divider()
+st.subheader("📊 Estatísticas da Rodada")
+
+col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+with col_s1:
+    st.metric("Respondidas", st.session_state.stats["answered"])
+with col_s2:
+    st.metric("Corretas", st.session_state.stats["correct"])
+with col_s3:
+    st.metric("Erradas", st.session_state.stats["wrong"])
+with col_s4:
+    acc = (st.session_state.stats["correct"] / st.session_state.stats["answered"] * 100) if st.session_state.stats["answered"] else 0.0
+    st.metric("Aproveitamento", f"{acc:.1f}%")
+
+hist_df = pd.DataFrame(st.session_state.history)
+if not hist_df.empty:
+    erros_por_tema = (hist_df.assign(err=lambda d: ~d["acertou"])
+                      .groupby("tema")["err"].sum()
+                      .sort_values(ascending=False))
+    tema_pior = erros_por_tema.index[0] if not erros_por_tema.empty and erros_por_tema.iloc[0] > 0 else "—"
+
+    left_stats, right_stats = st.columns([0.55, 0.45])
+    with left_stats:
+        st.markdown(f"**Tema com mais erros:** {tema_pior}")
+        st.dataframe(hist_df.tail(10).rename(columns={
+            "id":"ID","tema":"Tema","dificuldade":"Dificuldade",
+            "selected":"Marcada","correct":"Correta","acertou":"Acertou?","timeout":"Timeout?"
+        }), use_container_width=True, height=260)
+
+    with right_stats:
+        fig, ax = plt.subplots(figsize=(6,3.2))
+        if not erros_por_tema.empty:
+            ax.bar(erros_por_tema.index, erros_por_tema.values)
+            ax.set_title("Erros por tema")
+            ax.set_xlabel("Tema")
+            ax.set_ylabel("Erros")
+            ax.tick_params(axis='x', rotation=45, labelsize=8)
+        else:
+            ax.text(0.5, 0.5, "Sem dados de erro ainda", ha='center', va='center')
+            ax.axis('off')
+        st.pyplot(fig, use_container_width=True)
+else:
+    st.info("Responda algumas questões para ver estatísticas e gráficos.")
