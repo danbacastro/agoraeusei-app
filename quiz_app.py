@@ -2,7 +2,7 @@
 # -------------------------------------------------------------
 # App de questões para estudo (GO - Obstetrícia)
 # - Carrega CSV: id, tema, enunciado, alternativa_a, ..., alternativa_e, correta, explicacao, dificuldade, tags
-# - Perguntas aleatórias sem repetição até esgotar (com filtro por tema)
+# - Perguntas aleatórias sem repetição até esgotar (com filtro por tema e DIFICULDADE)
 # - Feedback Correto/Errado + justificativa
 # - Estatísticas e gráfico de erros por tema
 # - Timer por questão (opcional) com penalização automática ao expirar
@@ -10,6 +10,7 @@
 # Correções:
 # - "Próxima pergunta" libera com um clique (sem dupla contagem)
 # - Progresso e posição da questão atual exibidos corretamente
+# - Filtro de DIFICULDADE (novo)
 # -------------------------------------------------------------
 
 import time
@@ -23,6 +24,9 @@ st.set_page_config(
     page_icon="🩺",
     layout="wide"
 )
+
+# Mapas de dificuldade
+DIFF_LABELS = {1: "Fácil", 2: "Médio", 3: "Difícil", 4: "Muito difícil"}
 
 # =========================
 # Helpers de estado
@@ -38,9 +42,10 @@ def init_state():
         "history": [],               # respostas do usuário
         "stats": {"answered": 0, "correct": 0, "wrong": 0},
         "tema_filtro": [],           # filtros de tema
+        "dificuldade_filtro": [],    # filtros de dificuldade (1..4)
         "ready": False,              # rodada inicializada
         "answered_ids": set(),       # evita dupla contagem por questão
-        "shuffle_map": {},           # id_da_questao -> lista com ordem das letras originais exibidas em A..E (ex.: ['C','A','E','B','D'])
+        "shuffle_map": {},           # id_da_questao -> ordem fixa das letras originais exibidas em A..E
         "timer_enabled": False,
         "timer_duration": 60,        # segundos por questão
         "question_start_ts": None,   # time.time() ao exibir nova questão
@@ -61,16 +66,35 @@ def load_csv(file) -> pd.DataFrame:
     if missing:
         st.error(f"CSV faltando colunas: {missing}")
         st.stop()
+
+    # Normaliza 'dificuldade' para inteiro 1..4 (aceita texto como 'fácil', 'médio' etc.)
+    if df["dificuldade"].dtype == object:
+        map_txt = {
+            "facil": 1, "fácil": 1, "easy": 1,
+            "medio": 2, "médio": 2, "medium": 2,
+            "dificil": 3, "difícil": 3, "hard": 3,
+            "muito dificil": 4, "muito difícil": 4, "very hard": 4
+        }
+        s = df["dificuldade"].astype(str).str.strip().str.lower()
+        df["dificuldade"] = s.map(map_txt)
+        df["dificuldade"] = pd.to_numeric(df["dificuldade"], errors="coerce").fillna(2).astype(int)
+    else:
+        df["dificuldade"] = pd.to_numeric(df["dificuldade"], errors="coerce").fillna(2).astype(int)
+    df["dificuldade"] = df["dificuldade"].clip(1, 4)
+
     return df
 
 def reset_round():
-    """Reinicia a rodada mantendo o DataFrame atual e o filtro de temas."""
+    """Reinicia a rodada mantendo o DataFrame atual e os filtros aplicados."""
     df = st.session_state.df.copy()
+
     temas = st.session_state.tema_filtro or sorted(df["tema"].dropna().unique().tolist())
-    filtered = df[df["tema"].isin(temas)].reset_index(drop=True)
+    difs  = st.session_state.dificuldade_filtro or sorted(df["dificuldade"].dropna().unique().tolist())
+
+    filtered = df[(df["tema"].isin(temas)) & (df["dificuldade"].isin(difs))].reset_index(drop=True)
 
     if filtered.empty:
-        st.warning("Nenhuma questão encontrada para os temas selecionados.")
+        st.warning("Nenhuma questão encontrada para os filtros selecionados (tema/dificuldade).")
         st.session_state.ready = False
         return
 
@@ -136,7 +160,6 @@ def build_display_options(row):
         original_map[disp_letter] = orig_letter
 
     original_correct = str(row["correta"]).strip().upper()
-    # encontra qual displayed_letter aponta para a original correta
     inv_map = {v: k for k, v in original_map.items()}
     displayed_correct_letter = inv_map[original_correct]
 
@@ -159,7 +182,7 @@ def record_answer(row, selected_displayed_letter: str, displayed_correct_letter:
     st.session_state.history.append({
         "id": qid,
         "tema": row["tema"],
-        "dificuldade": row["dificuldade"],
+        "dificuldade": int(row["dificuldade"]),
         "selected": selected_displayed_letter if not timeout else "— (tempo)",
         "correct": displayed_correct_letter,
         "acertou": is_correct,
@@ -227,6 +250,7 @@ with st.sidebar:
         st.success("Banco carregado com sucesso.")
         st.metric("Total de questões", len(st.session_state.df))
 
+        # --- Filtro por TEMA ---
         temas = sorted(st.session_state.df["tema"].dropna().unique().tolist())
         st.session_state.tema_filtro = st.multiselect(
             "Filtrar por tema (opcional):",
@@ -234,6 +258,24 @@ with st.sidebar:
             default=temas,
             on_change=start_new_round_from_theme_change
         )
+
+        # --- Filtro por DIFICULDADE (NOVO) ---
+        niv_disponiveis = sorted(st.session_state.df["dificuldade"].dropna().astype(int).unique().tolist())
+        labels_disponiveis = [DIFF_LABELS.get(int(n), f"Nível {int(n)}") for n in niv_disponiveis]
+        label2num = {DIFF_LABELS[k]: k for k in DIFF_LABELS}
+
+        sel_labels = st.multiselect(
+            "Filtrar por dificuldade (opcional):",
+            options=labels_disponiveis,
+            default=labels_disponiveis,
+            help="Se nada marcado, o app usa todas as dificuldades."
+        )
+        # salva no estado como números (1..4)
+        st.session_state.dificuldade_filtro = [label2num[l] for l in sel_labels] if sel_labels else []
+
+        # Botão para aplicar o filtro de dificuldade
+        if st.button("Aplicar filtros de dificuldade", use_container_width=True):
+            reset_round()
 
         # Timer
         st.session_state.timer_enabled = st.checkbox("⏱️ Ativar timer por questão", value=st.session_state.timer_enabled)
@@ -272,7 +314,7 @@ with right:
         st.metric("Questões no banco", value=len(st.session_state.df))
 
 if not st.session_state.ready:
-    st.info("Selecione os temas (opcional), ajuste o timer e clique em **Iniciar / Reiniciar rodada** na barra lateral para começar.")
+    st.info("Selecione os temas/dificuldades (opcional), ajuste o timer e clique em **Iniciar / Reiniciar rodada** na barra lateral para começar.")
     st.stop()
 
 total = len(st.session_state.order)
@@ -296,7 +338,7 @@ if row is None:
         if st.button("🔁 Reiniciar com os mesmos filtros"):
             reset_round()
     with col_end2:
-        st.write("Dica: ajuste os filtros de tema na barra lateral para focar onde houve mais erro.")
+        st.write("Dica: ajuste os filtros na barra lateral para focar onde houve mais erro.")
     st.balloons()
     st.stop()
 
@@ -310,8 +352,11 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 top_cols = st.columns([0.5,0.2,0.3])
 with top_cols[0]:
     st.markdown(f"**{row['id']}**")
-    st.markdown(f'<span class="badge badge-blue">{row["tema"]}</span> &nbsp; '
-                f'<span class="badge badge-amber">Dificuldade: {row["dificuldade"]}</span>', unsafe_allow_html=True)
+    st.markdown(
+        f'<span class="badge badge-blue">{row["tema"]}</span> &nbsp; '
+        f'<span class="badge badge-amber">Dificuldade: {DIFF_LABELS.get(int(row["dificuldade"]), "Médio")}</span>',
+        unsafe_allow_html=True
+    )
 with top_cols[1]:
     st.metric("Respondidas", answered)
 with top_cols[2]:
@@ -388,7 +433,6 @@ if st.session_state.feedback_shown:
         if is_correct:
             st.success(f"✅ **Correta!**")
         else:
-            # se houve seleção, mostrar qual foi; se timeout, mensagem apropriada
             last = next((h for h in reversed(st.session_state.history) if h["id"] == qid), None)
             if last and last.get("timeout"):
                 st.error(f"⌛ **Tempo esgotado.** A alternativa correta é **{displayed_correct_letter}**.")
@@ -399,7 +443,6 @@ if st.session_state.feedback_shown:
         st.markdown("**Alternativas:**")
         for k, v in options.items():
             klass = "option"
-            # Descobre qual foi a marcada (se houve)
             marked = None
             last = next((h for h in reversed(st.session_state.history) if h["id"] == qid), None)
             if last and not last.get("timeout"):
