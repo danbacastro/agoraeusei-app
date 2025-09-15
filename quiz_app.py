@@ -56,7 +56,112 @@ def init_state():
             st.session_state[k] = v
 
 def load_csv(file) -> pd.DataFrame:
-    df = pd.read_csv(file)
+    import io, csv, unicodedata
+
+    # Lê bytes (funciona tanto para file-like do Streamlit quanto para caminho str)
+    if hasattr(file, "read"):  # uploaded file
+        raw = file.read()
+    else:  # caminho em disco
+        with open(file, "rb") as f:
+            raw = f.read()
+
+    # Tenta codificações típicas
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            detected_encoding = enc
+            break
+        except Exception:
+            continue
+    if text is None:
+        st.error("Não foi possível decodificar o arquivo (UTF-8/Latin-1).")
+        st.stop()
+
+    # Sniffer de delimitador
+    sample = text[:20000]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",",";","\t","|"])
+        sep = dialect.delimiter
+    except Exception:
+        # fallback: tenta automático do pandas (sep=None) e depois tentativas manuais
+        sep = None
+
+    # Tenta leitura
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=sep, engine="python")
+        detected_sep = sep if sep is not None else "auto"
+    except Exception:
+        # tentativas manuais
+        for sep_try in [",",";","\t","|"]:
+            try:
+                df = pd.read_csv(io.StringIO(text), sep=sep_try, engine="python")
+                detected_sep = sep_try
+                break
+            except Exception:
+                df = None
+        if df is None:
+            st.error("Erro ao ler o CSV. Tente exportar novamente em UTF-8 e com vírgula como separador.")
+            st.stop()
+
+    # Remove colunas "Unnamed"
+    df = df[[c for c in df.columns if not str(c).lower().startswith("unnamed")]]
+
+    # Normaliza nomes de colunas (tira acento e espaços extras)
+    def norm_col(c):
+        c = str(c).strip().lower()
+        c = "".join(ch for ch in unicodedata.normalize("NFD", c) if unicodedata.category(ch) != "Mn")
+        return c
+
+    df.columns = [norm_col(c) for c in df.columns]
+
+    # Mapeia nomes esperados (aceita variações: explicação/explicacao; tema / topico etc.)
+    aliases = {
+        "id":"id",
+        "tema":"tema",
+        "topico":"tema",
+        "enunciado":"enunciado",
+        "pergunta":"enunciado",
+        "alternativa_a":"alternativa_a",
+        "a":"alternativa_a",
+        "alternativa_b":"alternativa_b",
+        "b":"alternativa_b",
+        "alternativa_c":"alternativa_c",
+        "c":"alternativa_c",
+        "alternativa_d":"alternativa_d",
+        "d":"alternativa_d",
+        "alternativa_e":"alternativa_e",
+        "e":"alternativa_e",
+        "correta":"correta",
+        "gabarito":"correta",
+        "explicacao":"explicacao",
+        "explicacao/justificativa":"explicacao",
+        "explicacao_justificativa":"explicacao",
+        "explicacao_ou_justificativa":"explicacao",
+        "explicacaoo":"explicacao",
+        "explicacao/":"explicacao",
+        "explicacao:":"explicacao",
+        "explicacao (justificativa)":"explicacao",
+        "explicacao (comentario)":"explicacao",
+        "explicacao/comentario":"explicacao",
+        "explicacaooucomentario":"explicacao",
+        "explicacaoo(comentario)":"explicacao",
+        "explicacao(comentario)":"explicacao",
+        "explicacaojustificativa":"explicacao",
+        "explicacao_":"explicacao",
+        "explicacao ":"explicacao",
+        "explicacao (":"explicacao",
+        "explicacao)": "explicacao",
+        "explicacao (resumo)": "explicacao",
+        "explicacao-resumo":"explicacao",
+        "explicacao-res":"explicacao",
+        "dificuldade":"dificuldade",
+        "nivel":"dificuldade",
+        "tags":"tags"
+    }
+    rename = {c: aliases[c] for c in df.columns if c in aliases}
+    df = df.rename(columns=rename)
+
     expected_cols = [
         "id","tema","enunciado",
         "alternativa_a","alternativa_b","alternativa_c","alternativa_d","alternativa_e",
@@ -64,23 +169,25 @@ def load_csv(file) -> pd.DataFrame:
     ]
     missing = [c for c in expected_cols if c not in df.columns]
     if missing:
-        st.error(f"CSV faltando colunas: {missing}")
+        st.error(
+            f"CSV lido com separador '{detected_sep}' e encoding '{detected_encoding}', "
+            f"mas faltam colunas: {missing}. Verifique o cabeçalho do arquivo."
+        )
         st.stop()
 
-    # Normaliza 'dificuldade' para inteiro 1..4 (aceita texto como 'fácil', 'médio' etc.)
+    # Normaliza dificuldade para 1..4
     if df["dificuldade"].dtype == object:
         map_txt = {
-            "facil": 1, "fácil": 1, "easy": 1,
-            "medio": 2, "médio": 2, "medium": 2,
-            "dificil": 3, "difícil": 3, "hard": 3,
-            "muito dificil": 4, "muito difícil": 4, "very hard": 4
+            "facil":1,"fácil":1,"easy":1,
+            "medio":2,"médio":2,"medium":2,
+            "dificil":3,"difícil":3,"hard":3,
+            "muito dificil":4,"muito difícil":4,"very hard":4
         }
         s = df["dificuldade"].astype(str).str.strip().str.lower()
-        df["dificuldade"] = s.map(map_txt)
-        df["dificuldade"] = pd.to_numeric(df["dificuldade"], errors="coerce").fillna(2).astype(int)
+        df["dificuldade"] = pd.to_numeric(s.map(map_txt), errors="coerce").fillna(2).astype(int)
     else:
         df["dificuldade"] = pd.to_numeric(df["dificuldade"], errors="coerce").fillna(2).astype(int)
-    df["dificuldade"] = df["dificuldade"].clip(1, 4)
+    df["dificuldade"] = df["dificuldade"].clip(1,4)
 
     return df
 
