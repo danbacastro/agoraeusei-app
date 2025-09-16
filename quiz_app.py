@@ -19,6 +19,47 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
+# --- Login simples (senha única) ---
+import streamlit as st, hashlib, hmac, os
+
+def _hash(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()
+
+def check_password() -> bool:
+    if "auth_ok" in st.session_state and st.session_state.auth_ok:
+        return True
+
+    st.markdown(
+        """
+        <style>
+        .login-card{max-width:420px;margin:3rem auto;padding:1.25rem 1.5rem;border:1px solid #e5e7eb;border-radius:0.75rem;background:#fff}
+        </style>
+        """, unsafe_allow_html=True
+    )
+    with st.container():
+        st.markdown('<div class="login-card">', unsafe_allow_html=True)
+        st.subheader("🔐 Acesso")
+        user = st.text_input("Usuário (opcional)", key="__usr__")
+        pwd  = st.text_input("Senha", type="password", key="__pwd__")
+        ok   = st.button("Entrar", use_container_width=True)
+
+        if ok:
+            expected = st.secrets.get("PASSWORD_SHA256", os.getenv("PASSWORD_SHA256", ""))
+            if expected and hmac.compare_digest(_hash(pwd), expected):
+                st.session_state.auth_ok = True
+                st.session_state.user = user or "Usuário"
+                st.experimental_rerun()
+            else:
+                st.error("Credenciais inválidas.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    return False
+
+if not check_password():
+    st.stop()
+# --- fim do login ---
+
+
 st.set_page_config(
     page_title="Banco de Questões GO - Obstetrícia",
     page_icon="🩺",
