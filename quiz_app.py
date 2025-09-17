@@ -19,44 +19,123 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-# --- Login simples (senha única) ---
-import streamlit as st, hashlib, hmac, os
+# =======================
+# 🔐 Login v2 (robusto + diagnóstico)
+# =======================
+import os, hmac, hashlib, streamlit as st
 
-def _hash(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()
+def _sha256(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest().lower()
+
+def _get_expected_hash(username: str | None) -> tuple[str | None, str]:
+    """
+    Retorna (hash_esperado, modo).
+    Prioridade:
+      1) users[username] (per-user, se username preenchido)
+      2) PASSWORD_PLAINTEXT (secrets)   ← prioridade sobre SHA global
+      3) PASSWORD_SHA256   (secrets)
+      4) PASSWORD_PLAINTEXT (env)
+      5) PASSWORD_SHA256    (env)
+    """
+    # 1) per-user
+    users = st.secrets.get("users", None)
+    if isinstance(users, dict) and (username or "").strip():
+        u = (username or "").strip()
+        h = users.get(u)
+        if h:
+            return str(h).strip().lower(), "per_user"
+
+    # 2) plaintext em secrets (prioridade)
+    p = st.secrets.get("PASSWORD_PLAINTEXT", "").strip()
+    if p:
+        return _sha256(p), "plaintext->hash(secrets)"
+
+    # 3) sha256 em secrets
+    h = st.secrets.get("PASSWORD_SHA256", "").strip().lower()
+    if h:
+        return h, "sha256(secrets)"
+
+    # 4) plaintext via env
+    p = os.getenv("PASSWORD_PLAINTEXT", "").strip()
+    if p:
+        return _sha256(p), "plaintext->hash(env)"
+
+    # 5) sha256 via env
+    h = os.getenv("PASSWORD_SHA256", "").strip().lower()
+    if h:
+        return h, "sha256(env)"
+
+    return None, "missing"
 
 def check_password() -> bool:
-    if "auth_ok" in st.session_state and st.session_state.auth_ok:
+    if st.session_state.get("auth_ok"):
         return True
 
-    st.markdown(
-        """
-        <style>
-        .login-card{max-width:420px;margin:3rem auto;padding:1.25rem 1.5rem;border:1px solid #e5e7eb;border-radius:0.75rem;background:#fff}
-        </style>
-        """, unsafe_allow_html=True
-    )
-    with st.container():
-        st.markdown('<div class="login-card">', unsafe_allow_html=True)
-        st.subheader("🔐 Acesso")
-        user = st.text_input("Usuário (opcional)", key="__usr__")
-        pwd  = st.text_input("Senha", type="password", key="__pwd__")
-        ok   = st.button("Entrar", use_container_width=True)
+    st.markdown("""
+    <style>
+    .login-card{max-width:420px;margin:3rem auto;padding:1.25rem 1.5rem;border:1px solid #e5e7eb;border-radius:0.75rem;background:#fff}
+    </style>
+    """, unsafe_allow_html=True)
 
-        if ok:
-            expected = st.secrets.get("PASSWORD_SHA256", os.getenv("PASSWORD_SHA256", ""))
-            if expected and hmac.compare_digest(_hash(pwd), expected):
-                st.session_state.auth_ok = True
-                st.session_state.user = user or "Usuário"
+    st.markdown('<div class="login-card">', unsafe_allow_html=True)
+    st.subheader("🔐 Acesso")
+
+    col1, col2 = st.columns([1,1])
+    with col1:
+        username = st.text_input("Usuário (deixe em branco se senha global)", key="__usr__")
+    with col2:
+        password = st.text_input("Senha", type="password", key="__pwd__")
+
+    # tira espaços invisíveis que às vezes o teclado móvel insere
+    username = (username or "").strip()
+    password = (password or "").strip()
+
+    info = st.empty()
+    ok = st.button("Entrar", use_container_width=True)
+
+    # Diagnóstico (não revela segredos, mostra só metadados)
+    with st.expander("Ajuda / Diagnóstico"):
+        exp, mode = _get_expected_hash(username or None)
+        st.caption(f"🔎 Modo detectado: **{mode}**")
+        st.caption(f"Secrets disponíveis: {list(st.secrets.keys())}")
+        if exp:
+            st.caption(f"Hash esperado (prefixo): `{exp[:8]}…`")
+        if password:
+            st.caption(f"Hash digitado (prefixo): `{_sha256(password)[:8]}…`")
+
+    if ok:
+        expected, mode = _get_expected_hash(username or None)
+        if not expected:
+            info.error("Senha/usuário não configurados. Defina em *Settings → Secrets* (Streamlit Cloud).")
+            return False
+
+        if password and hmac.compare_digest(_sha256(password), expected):
+            st.session_state["auth_ok"] = True
+            st.session_state["user"] = username or "Usuário"
+            try:
                 st.experimental_rerun()
-            else:
-                st.error("Credenciais inválidas.")
-        st.markdown('</div>', unsafe_allow_html=True)
+            except Exception:
+                st.rerun()
+            return True
+        else:
+            info.error("Credenciais inválidas.")
+            return False
 
+    st.markdown('</div>', unsafe_allow_html=True)
     return False
 
 if not check_password():
     st.stop()
+
+# Botão de sair no sidebar
+with st.sidebar:
+    if st.button("Sair"):
+        for k in ("auth_ok","user","__usr__","__pwd__"):
+            st.session_state.pop(k, None)
+        try:
+            st.experimental_rerun()
+        except Exception:
+            st.rerun()
 # --- fim do login ---
 
 
