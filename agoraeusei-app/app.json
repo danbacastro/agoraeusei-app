@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "AgoraEuSei",
+    "slug": "agoraeusei-app",
+    "scheme": "agoraeusei",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.seuorg.agoraeusei"
+    },
+    "android": {
+      "package": "com.seuorg.agoraeusei",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
