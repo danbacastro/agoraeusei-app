@@ -1,15 +1,19 @@
 # streamlit_quiz_app.py
 # -------------------------------------------------------------
-# Banco de Questões (com login, filtros, imagens, timer e stats)
+# Banco de Questões (login, filtros, imagens, timer e stats)
 # - CSV: id, tema, enunciado, alternativa_a..e, correta, explicacao, dificuldade, tags
-# - Opcional: imagem1, imagem2 (ou image1, image2) para exibir figuras
-# - Carrega CSV de upload, caminho local OU URL (GitHub RAW)
+# - Opcional: imagem1, imagem2 (ou image1, image2)
+# - Carrega CSV por URL (GitHub RAW), upload ou fallback para URL padrão
 # -------------------------------------------------------------
 
 import os, time, random, hmac, hashlib
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import requests  # necessário para baixar CSV por URL
+
+# 🔗 URL padrão do CSV no GitHub (RAW)
+DEFAULT_CSV_URL = "https://raw.githubusercontent.com/danbacastro/agoraeusei-app/main/questoes.csv"
 
 # =======================
 # 🔐 Login v2 (per-user / senha global)
@@ -154,20 +158,16 @@ def init_state():
             st.session_state[k] = v
 
 # =========================
-# Leitura do CSV (local/upload/URL)
+# Leitura do CSV (URL / upload / fallback)
 # =========================
 def load_csv(file_or_url) -> pd.DataFrame:
     import io, csv, unicodedata
-    try:
-        import requests
-    except Exception:
-        requests = None
 
     def is_url(x: str) -> bool:
         return isinstance(x, str) and x.startswith(("http://","https://"))
 
-    # pega bytes do arquivo
-    if hasattr(file_or_url, "read"):  # upload
+    # upload
+    if hasattr(file_or_url, "read"):
         raw = file_or_url.read()
         text = None
         for enc in ("utf-8-sig","utf-8","latin-1"):
@@ -176,21 +176,16 @@ def load_csv(file_or_url) -> pd.DataFrame:
             except Exception: pass
         if text is None:
             st.error("Não foi possível decodificar o arquivo (UTF-8/Latin-1)."); st.stop()
-        buf = io.StringIO(text)
-        df = pd.read_csv(buf, sep=None, engine="python")
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
 
     elif is_url(file_or_url):
-        if requests is None:
-            st.error("Pacote 'requests' não disponível para baixar a URL.")
-            st.stop()
         try:
             r = requests.get(file_or_url, timeout=20)
             r.raise_for_status()
             text = r.text
             df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
         except Exception as e:
-            st.error(f"Falha ao baixar CSV da URL: {e}")
-            st.stop()
+            st.error(f"Falha ao baixar CSV da URL: {e}"); st.stop()
 
     else:  # caminho local
         with open(file_or_url, "rb") as f:
@@ -208,10 +203,9 @@ def load_csv(file_or_url) -> pd.DataFrame:
     df = df[[c for c in df.columns if not str(c).lower().startswith("unnamed")]]
 
     # normaliza nomes
-    import unicodedata as ud
     def norm_col(c):
         c = str(c).strip().lower()
-        c = "".join(ch for ch in ud.normalize("NFD", c) if ud.category(ch) != "Mn")
+        c = "".join(ch for ch in unicodedata.normalize("NFD", c) if unicodedata.category(ch) != "Mn")
         return c
     df.columns = [norm_col(c) for c in df.columns]
 
@@ -392,22 +386,29 @@ with st.sidebar:
     )
     uploaded = st.file_uploader("CSV de questões (upload)", type=["csv"])
 
+    # PRIORIDADE:
+    # 1) URL digitada
+    # 2) Upload
+    # 3) URL padrão (DEFAULT_CSV_URL)
     if github_url.strip():
         try:
             st.session_state.df = load_csv(github_url.strip())
-            st.success("CSV carregado da URL com sucesso.")
+            st.success("CSV carregado da URL informada.")
         except Exception as e:
             st.error(f"Erro ao ler a URL: {e}")
     elif uploaded is not None:
         try:
             st.session_state.df = load_csv(uploaded)
+            st.success("CSV carregado do upload.")
         except Exception as e:
             st.error(f"Erro ao ler o CSV enviado: {e}")
     else:
+        # fallback padrão: tenta automaticamente o questoes.csv do GitHub
         try:
-            st.session_state.df = load_csv("questoes_obstetricia_completo.csv")
+            st.session_state.df = load_csv(DEFAULT_CSV_URL)
+            st.success("CSV carregado automaticamente do GitHub (padrão).")
         except Exception:
-            st.info("Nenhum arquivo padrão encontrado. Informe uma URL ou faça o upload do CSV para começar.")
+            st.info("Informe uma URL RAW do GitHub ou faça upload do CSV para começar.")
 
     if st.session_state.df is not None:
         st.metric("Total de questões", len(st.session_state.df))
