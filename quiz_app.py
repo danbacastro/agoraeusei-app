@@ -5,7 +5,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 # =======================
-# 🔐 Login v2 (robusto + diagnóstico)
+# 🔐 Login v2
 # =======================
 import os, hmac, hashlib, streamlit as st
 
@@ -434,7 +434,7 @@ with left:
     st.title("🩺 Banco de Questões de Medicina")
     st.caption("Dica de Estudo: Plastifique as páginas para as lágrimas não estragarem o caderno!")
 with right:
-    st.metric("Questões no Banco", value="—")
+    st.metric("Questões no banco", value="—")
 
 # =========================
 # Sidebar - Configurações
