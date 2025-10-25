@@ -442,7 +442,7 @@ with right:
 
 with st.sidebar:
     st.header("Configurações")
-    st.write("Carregue o **CSV** ou use `questoes_obstetricia_completo.csv` no diretório do app.")
+    st.write("Carregue o arquivo **CSV** no app.")
 
     uploaded = st.file_uploader("CSV de questões", type=["csv"])
 
