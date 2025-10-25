@@ -1,18 +1,3 @@
-# streamlit_quiz_app.py
-# -------------------------------------------------------------
-# App de questões para estudo (GO - Obstetrícia)
-# - Carrega CSV: id, tema, enunciado, alternativa_a, ..., alternativa_e, correta, explicacao, dificuldade, tags
-# - Perguntas aleatórias sem repetição até esgotar (com filtro por tema e DIFICULDADE)
-# - Feedback Correto/Errado + justificativa
-# - Estatísticas e gráfico de erros por tema
-# - Timer por questão (opcional) com penalização automática ao expirar
-# - Randomização da ordem das alternativas (gabarito consistente)
-# Correções:
-# - "Próxima pergunta" libera com um clique (sem dupla contagem)
-# - Progresso e posição da questão atual exibidos corretamente
-# - Filtro de DIFICULDADE (novo)
-# -------------------------------------------------------------
-
 import time
 import random
 import pandas as pd
@@ -140,7 +125,7 @@ with st.sidebar:
 
 
 st.set_page_config(
-    page_title="Banco de Questões GO - Obstetrícia",
+    page_title="Agora Eu Sei - Banco de Questões",
     page_icon="🩺",
     layout="wide"
 )
@@ -446,10 +431,10 @@ st.markdown("""
 
 left, right = st.columns([0.7, 0.3], gap="large")
 with left:
-    st.title("🩺 Banco de Questões – Obstetrícia (GO)")
-    st.caption("Estudo ativo com questões aleatórias, feedback imediato, timer e estatísticas por tema.")
+    st.title("🩺 Banco de Questões de Medicina")
+    st.caption("Dica de Estudo: Plastifique as páginas para as lágrimas não estragarem o caderno!")
 with right:
-    st.metric("Questões no banco", value="—")
+    st.metric("Questões no Banco", value="—")
 
 # =========================
 # Sidebar - Configurações
