@@ -1,9 +1,10 @@
 # streamlit_quiz_app.py
 # -------------------------------------------------------------
 # Banco de Questões (login, filtros, imagens, timer e stats)
-# - CSV: id, tema, enunciado, alternativa_a..e, correta, explicacao, dificuldade, tags
+# - CSV: id, tema, enunciado, alternativa_a..e (ou até _j), correta, explicacao, dificuldade, tags
 # - Opcional: imagem1, imagem2 (ou image1, image2)
 # - Carrega CSV por URL (GitHub RAW), upload ou fallback para URL padrão
+# - Suporte a alternativas dinâmicas A..J (com fallback se 'correta' vier inválida)
 # -------------------------------------------------------------
 
 import os, time, random, hmac, hashlib
@@ -12,14 +13,15 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import requests  # necessário para baixar CSV por URL
 
-# 🔗 URL padrão do CSV no GitHub (RAW)
+# 🔗 URL padrão do CSV no GitHub (RAW) — AJUSTADA!
 DEFAULT_CSV_URL = "https://raw.githubusercontent.com/danbacastro/agoraeusei-app/main/questoes.csv"
 
 # =======================
 # 🔐 Login v2 (per-user / senha global)
 # =======================
 def _sha256(s: str) -> str:
-    return hashlib.sha256((s or "").encode("utf-8")).hexdigest().lower()
+    import hashlib as _hl
+    return _hl.sha256((s or "").encode("utf-8")).hexdigest().lower()
 
 def _get_expected_hash(username: str | None) -> tuple[str | None, str]:
     """
@@ -158,7 +160,7 @@ def init_state():
             st.session_state[k] = v
 
 # =========================
-# Leitura do CSV (URL / upload / fallback)
+# Leitura do CSV (URL / upload / fallback para URL padrão)
 # =========================
 def load_csv(file_or_url) -> pd.DataFrame:
     import io, csv, unicodedata
@@ -217,6 +219,11 @@ def load_csv(file_or_url) -> pd.DataFrame:
         "alternativa_c":"alternativa_c","c":"alternativa_c",
         "alternativa_d":"alternativa_d","d":"alternativa_d",
         "alternativa_e":"alternativa_e","e":"alternativa_e",
+        "alternativa_f":"alternativa_f","f":"alternativa_f",
+        "alternativa_g":"alternativa_g","g":"alternativa_g",
+        "alternativa_h":"alternativa_h","h":"alternativa_h",
+        "alternativa_i":"alternativa_i","i":"alternativa_i",
+        "alternativa_j":"alternativa_j","j":"alternativa_j",
         "correta":"correta","gabarito":"correta",
         "explicacao":"explicacao","explicacao/justificativa":"explicacao",
         "dificuldade":"dificuldade","nivel":"dificuldade",
@@ -227,12 +234,12 @@ def load_csv(file_or_url) -> pd.DataFrame:
     }
     df = df.rename(columns={c: aliases.get(c, c) for c in df.columns})
 
-    expected_cols = [
+    expected_cols_min = [
         "id","tema","enunciado",
         "alternativa_a","alternativa_b","alternativa_c","alternativa_d","alternativa_e",
         "correta","explicacao","dificuldade","tags"
     ]
-    missing = [c for c in expected_cols if c not in df.columns]
+    missing = [c for c in expected_cols_min if c not in df.columns]
     if missing:
         st.error(f"CSV faltando colunas obrigatórias: {missing}")
         st.stop()
@@ -290,34 +297,72 @@ def get_current_row():
     idx = st.session_state.order[st.session_state.pos]
     return st.session_state.filtered_df.iloc[idx]
 
-def ensure_shuffle_for_question(qid: str):
+# ======= NOVO: suporte a A..J (dinâmico) =======
+def _available_letters_for_row(row: pd.Series) -> list[str]:
+    """Detecta dinamicamente as letras de alternativas disponíveis na linha (A..J)."""
+    letters_all = ["A","B","C","D","E","F","G","H","I","J"]
+    letters = []
+    for L in letters_all:
+        col = f"alternativa_{L.lower()}"
+        if col in row.index and isinstance(row[col], str) and row[col].strip():
+            letters.append(L)
+    # fallback defensivo: se não achar nada, considera A..E (não quebra)
+    if not letters:
+        letters = ["A","B","C","D","E"]
+    return letters
+
+def ensure_shuffle_for_question(qid: str, letters: list[str]):
+    """Gera e fixa uma ordem de alternativas por questão para estabilidade entre reruns."""
     if qid not in st.session_state.shuffle_map:
-        original_letters = ["A","B","C","D","E"]
-        random.shuffle(original_letters)
-        st.session_state.shuffle_map[qid] = original_letters
+        ord_ = letters[:]
+        random.shuffle(ord_)
+        st.session_state.shuffle_map[qid] = ord_
+    else:
+        cur = st.session_state.shuffle_map[qid]
+        if set(cur) != set(letters):
+            ord_ = letters[:]
+            random.shuffle(ord_)
+            st.session_state.shuffle_map[qid] = ord_
 
-def build_display_options(row):
+def build_display_options(row: pd.Series):
+    """
+    Retorna:
+      - displayed_options: dict {'A': 'texto', ...} com ordem aleatória por questão
+      - displayed_correct_letter: letra correta NA EXIBIÇÃO atual
+      - original_map: dict displayed_letter -> original_letter
+    Aceita A..J. Se 'correta' vier inválida, normaliza; se ainda assim for inválida, usa a 1ª letra como fallback.
+    NUNCA pula a questão: sempre há um fallback seguro.
+    """
     qid = str(row["id"])
-    ensure_shuffle_for_question(qid)
-    order = st.session_state.shuffle_map[qid]
+    letters = _available_letters_for_row(row)
 
-    original_texts = {
-        "A": row["alternativa_a"],
-        "B": row["alternativa_b"],
-        "C": row["alternativa_c"],
-        "D": row["alternativa_d"],
-        "E": row["alternativa_e"],
-    }
-    displayed_letters = ["A","B","C","D","E"]
+    ensure_shuffle_for_question(qid, letters)
+    order = st.session_state.shuffle_map[qid]  # letras originais na ordem exibida
+
+    # textos originais
+    original_texts = {L: row.get(f"alternativa_{L.lower()}", "") for L in letters}
+
+    # monta mapas exibidos
+    displayed_letters = letters[:]  # usamos as mesmas letras
     displayed_options, original_map = {}, {}
     for i, disp_letter in enumerate(displayed_letters):
         orig_letter = order[i]
         displayed_options[disp_letter] = original_texts[orig_letter]
         original_map[disp_letter] = orig_letter
 
+    # normaliza 'correta'
     original_correct = str(row["correta"]).strip().upper()
+    if original_correct and len(original_correct) > 1 and original_correct[1:2] in [")", "."]:
+        original_correct = original_correct[0]
+
+    if original_correct not in letters:
+        # fallback sem pular a questão: usa a primeira letra disponível
+        original_correct = letters[0]
+
+    # mapeia para a letra exibida correspondente
     inv_map = {v: k for k, v in original_map.items()}
-    displayed_correct_letter = inv_map[original_correct]
+    displayed_correct_letter = inv_map.get(original_correct, displayed_letters[0])
+
     return displayed_options, displayed_correct_letter, original_map
 
 def record_answer(row, selected_displayed_letter: str, displayed_correct_letter: str, timeout=False):
@@ -420,6 +465,7 @@ with st.sidebar:
         )
 
         # Filtro por DIFICULDADE
+        DIFF_LABELS = {1: "Fácil", 2: "Médio", 3: "Difícil", 4: "Muito difícil"}
         nivs = sorted(st.session_state.df["dificuldade"].dropna().astype(int).unique().tolist())
         labels = [DIFF_LABELS.get(int(n), f"Nível {int(n)}") for n in nivs]
         label2num = {v:k for k,v in DIFF_LABELS.items()}
@@ -497,7 +543,7 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 # --- Imagens opcionais (imagem1/2 ou image1/2) ---
 img1 = row.get("imagem1", None) if hasattr(row, "get") else None
 img2 = row.get("imagem2", None) if hasattr(row, "get") else None
-if img1 is None and isinstance(row, pd.Series):
+if isinstance(row, pd.Series) and (img1 is None):
     img1 = row.get("image1", None)
     img2 = row.get("image2", None)
 
